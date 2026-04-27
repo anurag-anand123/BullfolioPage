@@ -1,0 +1,4 @@
+{
+  "sp500": ["AAPL", "MSFT", "AMD"],
+  "nifty500": ["RELIANCE.NS", "TCS.NS", "MARICO.NS"]
+}
