@@ -7,9 +7,9 @@ on:
   workflow_dispatch:      # Allow manual trigger from the GitHub Actions UI.
     inputs:
       request_delay:
-        description: 'Seconds between API calls (default 8 for free tier)'
+        description: 'Seconds between API calls (default 1.2 for Grow 55 plan)'
         required: false
-        default: '8'
+        default: '1.2'
 
 jobs:
   fetch:
@@ -34,7 +34,7 @@ jobs:
       - name: Fetch market data
         env:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
-          REQUEST_DELAY: ${{ github.event.inputs.request_delay || '8' }}
+          REQUEST_DELAY: ${{ github.event.inputs.request_delay || '1.2' }}
         run: python scripts/fetch_market_data.py
 
       - name: Commit and push data files
