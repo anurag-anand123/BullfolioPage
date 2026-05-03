@@ -43,13 +43,13 @@ RETURN_PERIODS = {
 
 # ─── API ──────────────────────────────────────────────────────────────────────
 
-def fetch_daily(symbol: str) -> dict | None:
-    """Fetch up to 10 years of daily OHLC from Twelve Data. Returns None on error."""
+def fetch_ohlc(symbol: str, interval: str, outputsize: int = 5000) -> dict | None:
+    """Fetch OHLC from Twelve Data for the given interval. Returns None on error."""
     url = (
         f'{BASE_URL}/time_series'
         f'?symbol={symbol}'
-        f'&interval=1day'
-        f'&outputsize=5000'
+        f'&interval={interval}'
+        f'&outputsize={outputsize}'
         f'&apikey={API_KEY}'
     )
     try:
@@ -57,11 +57,11 @@ def fetch_daily(symbol: str) -> dict | None:
         r.raise_for_status()
         data = r.json()
         if data.get('status') == 'error':
-            print(f'  [skip] {symbol}: {data.get("message", "API error")}')
+            print(f'  [skip] {symbol} {interval}: {data.get("message", "API error")}')
             return None
         return data
     except Exception as exc:
-        print(f'  [error] {symbol}: {exc}')
+        print(f'  [error] {symbol} {interval}: {exc}')
         return None
 
 
@@ -170,64 +170,69 @@ def write_json(path: Path, obj: object) -> None:
 
 # ─── Core loop ────────────────────────────────────────────────────────────────
 
-def process_symbols(symbols: list[str]) -> dict[str, dict]:
+def process_symbols(symbols: list[str]) -> tuple[dict[str, dict], dict[str, float]]:
     """
     For each symbol:
-      - Fetch daily OHLC from Twelve Data (1 API credit each).
-      - Derive weekly and monthly candles without extra API calls.
-      - Write  data/ohlc/{SYMBOL}/1d.json
-               data/ohlc/{SYMBOL}/1wk.json
-               data/ohlc/{SYMBOL}/1mo.json
-      - Return {symbol: {period: return_pct}} for the screener file.
+      - Fetch daily OHLC (1 credit) → writes 1d / 1wk / 1mo JSON files.
+      - Fetch 1h OHLC   (1 credit) → writes 1h JSON file.
+      - Returns ({symbol: returns}, {symbol: day_change_pct}).
     """
     ohlc_dir = DATA_DIR / 'ohlc'
-    screener: dict[str, dict] = {}
+    screener:     dict[str, dict]  = {}
+    daily_quotes: dict[str, float] = {}
     total = len(symbols)
 
     for idx, symbol in enumerate(symbols, 1):
         print(f'  [{idx:>4}/{total}] {symbol}', flush=True)
 
-        data = fetch_daily(symbol)
-        if data is None:
-            time.sleep(REQUEST_DELAY)
-            continue
-
-        ts, o, h, l, c = parse_values(data)
-        if not ts:
-            print(f'           → empty, skipping')
-            time.sleep(REQUEST_DELAY)
-            continue
-
-        sym_dir = ohlc_dir / symbol
-
-        # Daily
-        write_json(sym_dir / '1d.json', {
-            's': symbol, 'u': ts[-1],
-            't': ts, 'o': o, 'h': h, 'l': l, 'c': c,
-        })
-
-        # Weekly (aggregated from daily — no extra API call)
-        wt, wo, wh, wl, wc = to_weekly(ts, o, h, l, c)
-        write_json(sym_dir / '1wk.json', {
-            's': symbol, 'u': wt[-1] if wt else 0,
-            't': wt, 'o': wo, 'h': wh, 'l': wl, 'c': wc,
-        })
-
-        # Monthly (aggregated from daily — no extra API call)
-        mt, mo, mh, ml, mc = to_monthly(ts, o, h, l, c)
-        write_json(sym_dir / '1mo.json', {
-            's': symbol, 'u': mt[-1] if mt else 0,
-            't': mt, 'o': mo, 'h': mh, 'l': ml, 'c': mc,
-        })
-
-        # Returns for screener
-        rets = compute_returns(ts, c)
-        if rets:
-            screener[symbol] = rets
-
+        # ── Daily (+ weekly/monthly derived) ─────────────────────────────────
+        data_1d = fetch_ohlc(symbol, '1day', outputsize=5000)
         time.sleep(REQUEST_DELAY)
 
-    return screener
+        if data_1d is not None:
+            ts, o, h, l, c = parse_values(data_1d)
+            if ts:
+                sym_dir = ohlc_dir / symbol
+
+                write_json(sym_dir / '1d.json', {
+                    's': symbol, 'u': ts[-1],
+                    't': ts, 'o': o, 'h': h, 'l': l, 'c': c,
+                })
+
+                wt, wo, wh, wl, wc = to_weekly(ts, o, h, l, c)
+                write_json(sym_dir / '1wk.json', {
+                    's': symbol, 'u': wt[-1] if wt else 0,
+                    't': wt, 'o': wo, 'h': wh, 'l': wl, 'c': wc,
+                })
+
+                mt, mo, mh, ml, mc = to_monthly(ts, o, h, l, c)
+                write_json(sym_dir / '1mo.json', {
+                    's': symbol, 'u': mt[-1] if mt else 0,
+                    't': mt, 'o': mo, 'h': mh, 'l': ml, 'c': mc,
+                })
+
+                rets = compute_returns(ts, c)
+                if rets:
+                    screener[symbol] = rets
+
+                # Day change: last close vs previous close
+                if len(c) >= 2 and c[-2] > 0:
+                    daily_quotes[symbol] = round((c[-1] - c[-2]) / c[-2] * 100, 2)
+
+        # ── Hourly ───────────────────────────────────────────────────────────
+        # outputsize=1000 ≈ 6 months of trading hours; enough for pattern work.
+        data_1h = fetch_ohlc(symbol, '1h', outputsize=1000)
+        time.sleep(REQUEST_DELAY)
+
+        if data_1h is not None:
+            ts_h, o_h, h_h, l_h, c_h = parse_values(data_1h)
+            if ts_h:
+                write_json(ohlc_dir / symbol / '1h.json', {
+                    's': symbol, 'u': ts_h[-1],
+                    't': ts_h, 'o': o_h, 'h': h_h, 'l': l_h, 'c': c_h,
+                })
+
+    return screener, daily_quotes
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
@@ -247,7 +252,7 @@ def main() -> None:
 
     # ── S&P 500 ───────────────────────────────────────────────────────────────
     print(f'── S&P 500 ({len(sp500)} symbols) ──')
-    sp500_returns = process_symbols(sp500)
+    sp500_returns, sp500_quotes = process_symbols(sp500)
     write_json(DATA_DIR / 'screener' / 'sp500_returns.json', {
         'updated': now_ts,
         'data': sp500_returns,
@@ -256,12 +261,20 @@ def main() -> None:
 
     # ── Nifty 500 ─────────────────────────────────────────────────────────────
     print(f'── Nifty 500 ({len(nifty500)} symbols) ──')
-    nifty500_returns = process_symbols(nifty500)
+    nifty500_returns, nifty500_quotes = process_symbols(nifty500)
     write_json(DATA_DIR / 'screener' / 'nifty500_returns.json', {
         'updated': now_ts,
         'data': nifty500_returns,
     })
     print(f'   → screener/nifty500_returns.json ({len(nifty500_returns)} symbols)\n')
+
+    # ── Daily quotes (day change % for watchlist) ──────────────────────────────
+    all_quotes = {**sp500_quotes, **nifty500_quotes}
+    write_json(DATA_DIR / 'daily_quotes.json', {
+        'updated': now_ts,
+        'data': all_quotes,
+    })
+    print(f'   → daily_quotes.json ({len(all_quotes)} symbols)\n')
 
     # ── Manifest ──────────────────────────────────────────────────────────────
     write_json(DATA_DIR / 'meta.json', {
