@@ -13,6 +13,7 @@ One API key, one daily run — all users share the pre-built data for free.
 
 import json
 import os
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -168,6 +169,20 @@ def write_json(path: Path, obj: object) -> None:
     path.write_text(json.dumps(obj, separators=(',', ':')))
 
 
+def cleanup_orphaned_ohlc(active_symbols: set) -> None:
+    """Delete any data/ohlc/<SYMBOL>/ dirs whose symbol is no longer in tickers.json."""
+    ohlc_dir = DATA_DIR / 'ohlc'
+    if not ohlc_dir.exists():
+        return
+    removed = []
+    for subdir in ohlc_dir.iterdir():
+        if subdir.is_dir() and subdir.name not in active_symbols:
+            shutil.rmtree(subdir)
+            removed.append(subdir.name)
+    if removed:
+        print(f'── Cleaned up {len(removed)} removed symbol(s): {", ".join(sorted(removed))}')
+
+
 # ─── Core loop ────────────────────────────────────────────────────────────────
 
 def process_symbols(symbols: list[str]) -> tuple[dict[str, dict], dict[str, float]]:
@@ -235,6 +250,9 @@ def main() -> None:
     tickers  = json.loads(TICKERS_FILE.read_text())
     sp500    = tickers.get('sp500', [])
     nifty500 = tickers.get('nifty500', [])
+
+    # ── Remove OHLC data for any symbol no longer in tickers.json ─────────────
+    cleanup_orphaned_ohlc(set(sp500) | set(nifty500))
 
     # ── S&P 500 ───────────────────────────────────────────────────────────────
     print(f'── S&P 500 ({len(sp500)} symbols) ──')
