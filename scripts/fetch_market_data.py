@@ -174,7 +174,6 @@ def process_symbols(symbols: list[str]) -> tuple[dict[str, dict], dict[str, floa
     """
     For each symbol:
       - Fetch daily OHLC (1 credit) → writes 1d / 1wk / 1mo JSON files.
-      - Fetch 1h OHLC   (1 credit) → writes 1h JSON file.
       - Returns ({symbol: returns}, {symbol: day_change_pct}).
     """
     ohlc_dir = DATA_DIR / 'ohlc'
@@ -218,19 +217,6 @@ def process_symbols(symbols: list[str]) -> tuple[dict[str, dict], dict[str, floa
                 # Day change: last close vs previous close
                 if len(c) >= 2 and c[-2] > 0:
                     daily_quotes[symbol] = round((c[-1] - c[-2]) / c[-2] * 100, 2)
-
-        # ── Hourly ───────────────────────────────────────────────────────────
-        # outputsize=1000 ≈ 6 months of trading hours; enough for pattern work.
-        data_1h = fetch_ohlc(symbol, '1h', outputsize=1000)
-        time.sleep(REQUEST_DELAY)
-
-        if data_1h is not None:
-            ts_h, o_h, h_h, l_h, c_h = parse_values(data_1h)
-            if ts_h:
-                write_json(ohlc_dir / symbol / '1h.json', {
-                    's': symbol, 'u': ts_h[-1],
-                    't': ts_h, 'o': o_h, 'h': h_h, 'l': l_h, 'c': c_h,
-                })
 
     return screener, daily_quotes
 
