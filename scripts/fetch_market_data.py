@@ -26,6 +26,9 @@ import requests
 API_KEY  = os.environ.get('TWELVE_DATA_API_KEY', '')
 BASE_URL = 'https://api.twelvedata.com'
 
+# 'sp500', 'nifty500', or 'all' (default).
+MARKET = os.environ.get('MARKET', 'all').lower()
+
 # Free tier: 8 req/min.  8 s between calls keeps us safely under the limit.
 # Set REQUEST_DELAY=0 in the environment if you're on a paid plan.
 REQUEST_DELAY = float(os.environ.get('REQUEST_DELAY', '8'))
@@ -244,59 +247,84 @@ def process_symbols(symbols: list[str]) -> tuple[dict[str, dict], dict[str, floa
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
+def load_existing_json(path: Path, default):
+    """Load an existing JSON file, returning default if missing or invalid."""
+    try:
+        if path.exists():
+            return json.loads(path.read_text())
+    except Exception:
+        pass
+    return default
+
+
 def main() -> None:
     if not API_KEY:
         print('ERROR: TWELVE_DATA_API_KEY environment variable is not set.')
         sys.exit(1)
 
-    now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+    now_ts  = int(datetime.now(tz=timezone.utc).timestamp())
     now_str = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-    print(f'=== Bullfolio market data fetch — {now_str} ===\n')
+    print(f'=== Bullfolio market data fetch ({MARKET}) — {now_str} ===\n')
 
     tickers  = json.loads(TICKERS_FILE.read_text())
     sp500    = tickers.get('sp500', [])
     nifty500 = tickers.get('nifty500', [])
 
+    run_sp500   = MARKET in ('sp500',   'all')
+    run_nifty   = MARKET in ('nifty500', 'all')
+
     # ── Remove OHLC data for any symbol no longer in tickers.json ─────────────
     cleanup_orphaned_ohlc(set(sp500) | set(nifty500))
 
+    sp500_returns,   sp500_quotes,   sp500_names   = {}, {}, {}
+    nifty500_returns, nifty500_quotes, nifty500_names = {}, {}, {}
+
     # ── S&P 500 ───────────────────────────────────────────────────────────────
-    print(f'── S&P 500 ({len(sp500)} symbols) ──')
-    sp500_returns, sp500_quotes, sp500_names = process_symbols(sp500)
-    write_json(DATA_DIR / 'screener' / 'sp500_returns.json', {
-        'updated': now_ts,
-        'data': sp500_returns,
-    })
-    print(f'   → screener/sp500_returns.json ({len(sp500_returns)} symbols)\n')
+    if run_sp500:
+        print(f'── S&P 500 ({len(sp500)} symbols) ──')
+        sp500_returns, sp500_quotes, sp500_names = process_symbols(sp500)
+        write_json(DATA_DIR / 'screener' / 'sp500_returns.json', {
+            'updated': now_ts,
+            'data': sp500_returns,
+        })
+        print(f'   → screener/sp500_returns.json ({len(sp500_returns)} symbols)\n')
 
     # ── Nifty 500 ─────────────────────────────────────────────────────────────
-    print(f'── Nifty 500 ({len(nifty500)} symbols) ──')
-    nifty500_returns, nifty500_quotes, nifty500_names = process_symbols(nifty500)
-    write_json(DATA_DIR / 'screener' / 'nifty500_returns.json', {
-        'updated': now_ts,
-        'data': nifty500_returns,
-    })
-    print(f'   → screener/nifty500_returns.json ({len(nifty500_returns)} symbols)\n')
+    if run_nifty:
+        print(f'── Nifty 500 ({len(nifty500)} symbols) ──')
+        nifty500_returns, nifty500_quotes, nifty500_names = process_symbols(nifty500)
+        write_json(DATA_DIR / 'screener' / 'nifty500_returns.json', {
+            'updated': now_ts,
+            'data': nifty500_returns,
+        })
+        print(f'   → screener/nifty500_returns.json ({len(nifty500_returns)} symbols)\n')
 
-    # ── Daily quotes (day change % for watchlist) ──────────────────────────────
-    all_quotes = {**sp500_quotes, **nifty500_quotes}
+    # ── Daily quotes — merge with existing so a partial run doesn't wipe the other market ──
+    existing_quotes = load_existing_json(DATA_DIR / 'daily_quotes.json', {}).get('data', {})
+    merged_quotes   = {**existing_quotes, **sp500_quotes, **nifty500_quotes}
     write_json(DATA_DIR / 'daily_quotes.json', {
         'updated': now_ts,
-        'data': all_quotes,
+        'data': merged_quotes,
     })
-    print(f'   → daily_quotes.json ({len(all_quotes)} symbols)\n')
+    new_count = len(sp500_quotes) + len(nifty500_quotes)
+    print(f'   → daily_quotes.json ({new_count} updated, {len(merged_quotes)} total)\n')
 
-    # ── Symbol search index (used by Flutter autocomplete instead of live API) ─
-    all_names = {**sp500_names, **nifty500_names}
-    symbols_list = [{'s': sym, 'n': all_names.get(sym, '')} for sym in (sp500 + nifty500)]
+    # ── Symbol search index — merge with existing for the same reason ──────────
+    existing_symbols = {e['s']: e['n'] for e in load_existing_json(DATA_DIR / 'symbols.json', [])}
+    new_names        = {**sp500_names, **nifty500_names}
+    existing_symbols.update(new_names)
+    all_symbols      = set(sp500 + nifty500)
+    symbols_list     = [{'s': sym, 'n': existing_symbols.get(sym, '')}
+                        for sym in (sp500 + nifty500) if sym in all_symbols]
     write_json(DATA_DIR / 'symbols.json', symbols_list)
     print(f'   → symbols.json ({len(symbols_list)} symbols)\n')
 
     # ── Manifest ──────────────────────────────────────────────────────────────
+    existing_meta = load_existing_json(DATA_DIR / 'meta.json', {})
     write_json(DATA_DIR / 'meta.json', {
         'updated':        now_ts,
-        'sp500_count':    len(sp500_returns),
-        'nifty500_count': len(nifty500_returns),
+        'sp500_count':    len(sp500_returns)   if run_sp500 else existing_meta.get('sp500_count',   0),
+        'nifty500_count': len(nifty500_returns) if run_nifty else existing_meta.get('nifty500_count', 0),
     })
 
     print('=== Done ===')

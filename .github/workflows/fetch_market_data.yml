@@ -12,6 +12,10 @@ on:
         description: 'Seconds between API calls (default 1.2 for Grow 55 plan)'
         required: false
         default: '1.2'
+      market:
+        description: 'Which market to fetch: sp500, nifty500, or all'
+        required: false
+        default: 'all'
 
 jobs:
   fetch:
@@ -21,10 +25,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
@@ -37,6 +41,13 @@ jobs:
         env:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay || '1.2' }}
+          # Scheduled runs: pick market based on which cron fired. Manual runs use the input.
+          MARKET: >-
+            ${{
+              github.event_name == 'workflow_dispatch' && github.event.inputs.market ||
+              (github.event.schedule == '1 10 * * 1-5' && 'nifty500') ||
+              'sp500'
+            }}
         run: python scripts/fetch_market_data.py
 
       - name: Commit and push data files
