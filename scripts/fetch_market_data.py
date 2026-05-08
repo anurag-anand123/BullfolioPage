@@ -185,15 +185,16 @@ def cleanup_orphaned_ohlc(active_symbols: set) -> None:
 
 # ─── Core loop ────────────────────────────────────────────────────────────────
 
-def process_symbols(symbols: list[str]) -> tuple[dict[str, dict], dict[str, float]]:
+def process_symbols(symbols: list[str]) -> tuple[dict[str, dict], dict[str, float], dict[str, str]]:
     """
     For each symbol:
       - Fetch daily OHLC (1 credit) → writes 1d / 1wk / 1mo JSON files.
-      - Returns ({symbol: returns}, {symbol: day_change_pct}).
+      - Returns ({symbol: returns}, {symbol: day_change_pct}, {symbol: name}).
     """
     ohlc_dir = DATA_DIR / 'ohlc'
     screener:     dict[str, dict]  = {}
     daily_quotes: dict[str, float] = {}
+    names:        dict[str, str]   = {}
     total = len(symbols)
 
     for idx, symbol in enumerate(symbols, 1):
@@ -204,6 +205,11 @@ def process_symbols(symbols: list[str]) -> tuple[dict[str, dict], dict[str, floa
         time.sleep(REQUEST_DELAY)
 
         if data_1d is not None:
+            # Capture company name from response metadata.
+            name = (data_1d.get('meta') or {}).get('name', '')
+            if name:
+                names[symbol] = name
+
             ts, o, h, l, c = parse_values(data_1d)
             if ts:
                 sym_dir = ohlc_dir / symbol
@@ -233,7 +239,7 @@ def process_symbols(symbols: list[str]) -> tuple[dict[str, dict], dict[str, floa
                 if len(c) >= 2 and c[-2] > 0:
                     daily_quotes[symbol] = round((c[-1] - c[-2]) / c[-2] * 100, 2)
 
-    return screener, daily_quotes
+    return screener, daily_quotes, names
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
@@ -256,7 +262,7 @@ def main() -> None:
 
     # ── S&P 500 ───────────────────────────────────────────────────────────────
     print(f'── S&P 500 ({len(sp500)} symbols) ──')
-    sp500_returns, sp500_quotes = process_symbols(sp500)
+    sp500_returns, sp500_quotes, sp500_names = process_symbols(sp500)
     write_json(DATA_DIR / 'screener' / 'sp500_returns.json', {
         'updated': now_ts,
         'data': sp500_returns,
@@ -265,7 +271,7 @@ def main() -> None:
 
     # ── Nifty 500 ─────────────────────────────────────────────────────────────
     print(f'── Nifty 500 ({len(nifty500)} symbols) ──')
-    nifty500_returns, nifty500_quotes = process_symbols(nifty500)
+    nifty500_returns, nifty500_quotes, nifty500_names = process_symbols(nifty500)
     write_json(DATA_DIR / 'screener' / 'nifty500_returns.json', {
         'updated': now_ts,
         'data': nifty500_returns,
@@ -279,6 +285,12 @@ def main() -> None:
         'data': all_quotes,
     })
     print(f'   → daily_quotes.json ({len(all_quotes)} symbols)\n')
+
+    # ── Symbol search index (used by Flutter autocomplete instead of live API) ─
+    all_names = {**sp500_names, **nifty500_names}
+    symbols_list = [{'s': sym, 'n': all_names.get(sym, '')} for sym in (sp500 + nifty500)]
+    write_json(DATA_DIR / 'symbols.json', symbols_list)
+    print(f'   → symbols.json ({len(symbols_list)} symbols)\n')
 
     # ── Manifest ──────────────────────────────────────────────────────────────
     write_json(DATA_DIR / 'meta.json', {
